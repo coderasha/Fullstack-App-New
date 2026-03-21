@@ -12,3 +12,40 @@ datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
 }
+
+enum Role {
+  WORKER
+  SUPERVISOR
+}
+
+model User {
+  id           String       @id @default(cuid())
+  name         String
+  email        String       @unique
+  passwordHash String
+  role         Role
+  phone        String?
+  department   String?
+  jobTitle     String?
+  locationNote String?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+  attendance   Attendance[]
+}
+
+model Attendance {
+  id              String    @id @default(cuid())
+  userId          String
+  latitude        Float
+  longitude       Float
+  address         String?
+  createdAt       DateTime  @default(now())
+  logoutLatitude  Float?
+  logoutLongitude Float?
+  logoutAddress   String?
+  logoutAt        DateTime?
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([userId, logoutAt])
+}
