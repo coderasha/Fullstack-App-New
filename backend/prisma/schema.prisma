@@ -18,34 +18,77 @@ enum Role {
   SUPERVISOR
 }
 
+enum AttendanceAction {
+  LOGIN
+  LOGOUT
+}
+
+enum AttendanceSource {
+  GPS
+  MANUAL
+}
+
+enum ManualAttendanceStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
 model User {
-  id           String       @id @default(cuid())
-  name         String
-  email        String       @unique
-  passwordHash String
-  role         Role
-  phone        String?
-  department   String?
-  jobTitle     String?
-  locationNote String?
-  createdAt    DateTime     @default(now())
-  updatedAt    DateTime     @updatedAt
-  attendance   Attendance[]
+  id                               String                    @id @default(cuid())
+  name                             String
+  email                            String                    @unique
+  passwordHash                     String
+  role                             Role
+  phone                            String?
+  department                       String?
+  jobTitle                         String?
+  locationNote                     String?
+  createdAt                        DateTime                  @default(now())
+  updatedAt                        DateTime                  @updatedAt
+  attendance                       Attendance[]
+  manualAttendanceRequests         ManualAttendanceRequest[] @relation("ManualAttendanceRequester")
+  reviewedManualAttendanceRequests ManualAttendanceRequest[] @relation("ManualAttendanceReviewer")
 }
 
 model Attendance {
-  id              String    @id @default(cuid())
+  id              String                   @id @default(cuid())
   userId          String
-  latitude        Float
-  longitude       Float
+  source          AttendanceSource         @default(GPS)
+  manualReason    String?
+  latitude        Float?
+  longitude       Float?
   address         String?
-  createdAt       DateTime  @default(now())
+  createdAt       DateTime                 @default(now())
+  logoutSource    AttendanceSource?
+  logoutManualReason String?
   logoutLatitude  Float?
   logoutLongitude Float?
   logoutAddress   String?
   logoutAt        DateTime?
-  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user            User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  manualRequest   ManualAttendanceRequest?
 
   @@index([userId, createdAt])
   @@index([userId, logoutAt])
+}
+
+model ManualAttendanceRequest {
+  id                  String                 @id @default(cuid())
+  userId              String
+  reviewerId          String?
+  action              AttendanceAction
+  reason              String
+  status              ManualAttendanceStatus @default(PENDING)
+  reviewNote          String?
+  createdAt           DateTime               @default(now())
+  reviewedAt          DateTime?
+  approvedAttendanceId String?               @unique
+  user                User                   @relation("ManualAttendanceRequester", fields: [userId], references: [id], onDelete: Cascade)
+  reviewer            User?                  @relation("ManualAttendanceReviewer", fields: [reviewerId], references: [id], onDelete: SetNull)
+  approvedAttendance  Attendance?            @relation(fields: [approvedAttendanceId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
+  @@index([reviewerId])
 }

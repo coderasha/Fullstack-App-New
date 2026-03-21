@@ -136,6 +136,91 @@ export class AppService {
     });
   }
 
+  async createManualAttendanceRequest(user: AuthenticatedUser, input: CreateManualAttendanceRequestInput) {
+    const reason = this.cleanOptional(input.reason);
+    if (!reason) {
+      throw new BadRequestException('Reason is required for manual attendance.');
+    }
+
+    const prisma = this.prisma as any;
+    const action = await this.getExpectedAttendanceAction(user.sub);
+    const pendingRequest = await prisma.manualAttendanceRequest.findFirst({
+      where: {
+        userId: user.sub,
+        action,
+        status: 'PENDING',
+      },
+    });
+
+    if (pendingRequest) {
+      throw new BadRequestException(
+        `A pending manual ${action.toLowerCase()} attendance request already exists.`,
+      );
+    }
+
+    return prisma.manualAttendanceRequest.create({
+      data: {
+        userId: user.sub,
+        action,
+        reason,
+      },
+      include: {
+        user: {
+          select: this.userSelect,
+        },
+        reviewer: {
+          select: this.userSelect,
+        },
+      },
+    });
+  }
+
+  async getOwnManualAttendanceRequests(user: AuthenticatedUser) {
+    const prisma = this.prisma as any;
+
+    return prisma.manualAttendanceRequest.findMany({
+      where: { userId: user.sub },
+      orderBy: { createdAt: 'desc' },
+      include: {
+        reviewer: {
+          select: this.userSelect,
+        },
+      },
+    });
+  }
+
+  async getAllManualAttendanceRequests() {
+    const prisma = this.prisma as any;
+
+    return prisma.manualAttendanceRequest.findMany({
+      orderBy: [{ status: 'asc' }, { createdAt: 'desc' }],
+      include: {
+        user: {
+          select: this.userSelect,
+        },
+        reviewer: {
+          select: this.userSelect,
+        },
+      },
+    });
+  }
+
+  async approveManualAttendanceRequest(
+    reviewer: AuthenticatedUser,
+    requestId: string,
+    input: ReviewManualAttendanceInput,
+  ) {
+    return this.reviewManualAttendanceRequest(reviewer, requestId, 'APPROVED', input);
+  }
+
+  async rejectManualAttendanceRequest(
+    reviewer: AuthenticatedUser,
+    requestId: string,
+    input: ReviewManualAttendanceInput,
+  ) {
+    return this.reviewManualAttendanceRequest(reviewer, requestId, 'REJECTED', input);
+  }
+
   async getAllAttendance() {
     const prisma = this.prisma as any;
 
@@ -187,6 +272,7 @@ export class AppService {
     return prisma.attendance.create({
       data: {
         userId,
+        source: 'GPS',
         latitude: input.latitude,
         longitude: input.longitude,
         address: this.cleanOptional(input.address),
@@ -208,12 +294,143 @@ export class AppService {
     return prisma.attendance.update({
       where: { id: activeAttendance.id },
       data: {
+        logoutSource: 'GPS',
         logoutLatitude: input.latitude,
         logoutLongitude: input.longitude,
         logoutAddress: this.cleanOptional(input.address),
         logoutAt: new Date(),
       },
     });
+  }
+
+  private async reviewManualAttendanceRequest(
+    reviewer: AuthenticatedUser,
+    requestId: string,
+    nextStatus: ManualAttendanceStatus,
+    input: ReviewManualAttendanceInput,
+  ) {
+    const prisma = this.prisma as any;
+    const request = await prisma.manualAttendanceRequest.findUnique({
+      where: { id: requestId },
+      include: {
+        user: {
+          select: this.userSelect,
+        },
+        reviewer: {
+          select: this.userSelect,
+        },
+      },
+    });
+
+    if (!request) {
+      throw new NotFoundException('Manual attendance request was not found.');
+    }
+
+    if (request.status !== 'PENDING') {
+      throw new BadRequestException('Manual attendance request has already been reviewed.');
+    }
+
+    if (request.userId === reviewer.sub) {
+      throw new BadRequestException('Supervisors cannot review their own manual attendance requests.');
+    }
+
+    const reviewNote = this.cleanOptional(input.reviewNote);
+
+    if (nextStatus === 'REJECTED') {
+      return prisma.manualAttendanceRequest.update({
+        where: { id: request.id },
+        data: {
+          status: 'REJECTED',
+          reviewNote,
+          reviewerId: reviewer.sub,
+          reviewedAt: new Date(),
+        },
+        include: {
+          user: {
+            select: this.userSelect,
+          },
+          reviewer: {
+            select: this.userSelect,
+          },
+        },
+      });
+    }
+
+    return prisma.$transaction(async (tx: any) => {
+      const attendance = await this.applyApprovedManualAttendance(tx, request);
+
+      return tx.manualAttendanceRequest.update({
+        where: { id: request.id },
+        data: {
+          status: 'APPROVED',
+          reviewNote,
+          reviewerId: reviewer.sub,
+          reviewedAt: new Date(),
+          approvedAttendanceId: attendance.id,
+        },
+        include: {
+          user: {
+            select: this.userSelect,
+          },
+          reviewer: {
+            select: this.userSelect,
+          },
+        },
+      });
+    });
+  }
+
+  private async applyApprovedManualAttendance(tx: any, request: ManualAttendanceRequestRecord) {
+    if (request.action === 'LOGIN') {
+      const activeAttendance = await tx.attendance.findFirst({
+        where: { userId: request.userId, logoutAt: null },
+        orderBy: { createdAt: 'desc' },
+      });
+
+      if (activeAttendance) {
+        throw new BadRequestException(
+          'This user already has an active login attendance. Manual login approval cannot be applied.',
+        );
+      }
+
+      return tx.attendance.create({
+        data: {
+          userId: request.userId,
+          source: 'MANUAL',
+          manualReason: request.reason,
+        },
+      });
+    }
+
+    const activeAttendance = await tx.attendance.findFirst({
+      where: { userId: request.userId, logoutAt: null },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    if (!activeAttendance) {
+      throw new BadRequestException(
+        'This user does not have an active login attendance. Manual logout approval cannot be applied.',
+      );
+    }
+
+    return tx.attendance.update({
+      where: { id: activeAttendance.id },
+      data: {
+        logoutSource: 'MANUAL',
+        logoutManualReason: request.reason,
+        logoutAt: new Date(),
+      },
+    });
+  }
+
+  private async getExpectedAttendanceAction(userId: string): Promise<AttendanceAction> {
+    const prisma = this.prisma as any;
+    const activeAttendance = await prisma.attendance.findFirst({
+      where: { userId, logoutAt: null },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    return activeAttendance ? 'LOGOUT' : 'LOGIN';
   }
 
   private async getUserRecordById(userId: string) {
@@ -362,7 +579,16 @@ type MarkAttendanceInput = {
   address?: string;
 };
 
+type CreateManualAttendanceRequestInput = {
+  reason: string;
+};
+
+type ReviewManualAttendanceInput = {
+  reviewNote?: string;
+};
+
 type AttendanceAction = 'LOGIN' | 'LOGOUT';
+type ManualAttendanceStatus = 'PENDING' | 'APPROVED' | 'REJECTED';
 
 type UserViewable = {
   id: string;
@@ -379,4 +605,11 @@ type UserViewable = {
 
 type UserRecord = UserViewable & {
   passwordHash: string;
+};
+
+type ManualAttendanceRequestRecord = {
+  id: string;
+  userId: string;
+  action: AttendanceAction;
+  reason: string;
 };
